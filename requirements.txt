@@ -1,0 +1,7 @@
+streamlit>=1.36
+pandas>=2.0
+streamlit-mic-recorder
+SpeechRecognition
+gTTS
+reportlab
+streamlit-autorefresh
