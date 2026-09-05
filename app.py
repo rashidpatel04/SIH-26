@@ -6133,16 +6133,6 @@ elif selected_page == "games":
                                 rounded_score = round(final_score, 1)
                                 save_completed_game("Face-Name Memory", rounded_score)
 
-                                st.session_state.game_result_message = game_result_voice(
-                                    "Face-Name Memory Game", rounded_score,
-                                    old_difficulty, new_difficulty, language
-                                )
-                                st.session_state.game_result_score = rounded_score
-                                st.session_state.game_result_old_difficulty = old_difficulty
-                                st.session_state.game_result_new_difficulty = new_difficulty
-
-                                reset_face_name_game()
-
                                 queue_voice(
                                     game_result_voice(
                                         "Face-Name Memory Game", rounded_score,
@@ -6151,7 +6141,35 @@ elif selected_page == "games":
                                     language
                                 )
 
-                                st.rerun()
+                                st.divider()
+                                st.markdown("## 🏁 Game Complete!")
+
+                                if rounded_score >= 70:
+                                    st.success(
+                                        f"🎉 Congratulations! You completed the Face-Name "
+                                        f"Memory Game with a final score of {rounded_score}/100."
+                                    )
+                                    if new_difficulty > old_difficulty:
+                                        st.success(
+                                            f"⬆️ Excellent performance! Your difficulty level "
+                                            f"increased from {old_difficulty} to {new_difficulty}."
+                                        )
+                                    else:
+                                        st.info(f"⭐ Your current difficulty level is {new_difficulty}.")
+                                else:
+                                    st.info(
+                                        f"Game completed with a final score of {rounded_score}/100. "
+                                        f"Keep practicing! Your current difficulty level is {new_difficulty}."
+                                    )
+
+                                if st.button(
+                                    "🔁 Play Again",
+                                    key=f"face_name_play_again_{current_round}",
+                                    type="primary",
+                                    use_container_width=True
+                                ):
+                                    reset_face_name_game()
+                                    st.rerun()
 
                             else:
                                 next_round = current_round + 1
@@ -6296,19 +6314,46 @@ elif selected_page == "games":
                             user_id, final_score
                         )
 
-                        save_fluency_game_result(final_score, old_difficulty, new_difficulty)
-
-                        reset_fluency_game()
+                        rounded_score = round(final_score, 1)
+                        save_completed_game("Category Naming", rounded_score)
 
                         queue_voice(
                             game_result_voice(
-                                "Category Naming Challenge", round(final_score, 1),
+                                "Category Naming Challenge", rounded_score,
                                 old_difficulty, new_difficulty, language
                             ),
                             language
                         )
 
-                        st.rerun()
+                        st.divider()
+                        st.markdown("## 🏁 Game Complete!")
+
+                        if rounded_score >= 70:
+                            st.success(
+                                f"🎉 Congratulations! You completed the Category Naming "
+                                f"Challenge with a final score of {rounded_score}/100."
+                            )
+                            if new_difficulty > old_difficulty:
+                                st.success(
+                                    f"⬆️ Excellent performance! Your difficulty level "
+                                    f"increased from {old_difficulty} to {new_difficulty}."
+                                )
+                            else:
+                                st.info(f"⭐ Your current difficulty level is {new_difficulty}.")
+                        else:
+                            st.info(
+                                f"Game completed with a final score of {rounded_score}/100. "
+                                f"Keep practicing! Your current difficulty level is {new_difficulty}."
+                            )
+
+                        if st.button(
+                            "🔁 Play Again",
+                            key=f"fluency_play_again_{current_round}",
+                            type="primary",
+                            use_container_width=True
+                        ):
+                            reset_fluency_game()
+                            st.rerun()
 
                     else:
                         next_round = current_round + 1
