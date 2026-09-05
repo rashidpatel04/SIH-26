@@ -1837,6 +1837,21 @@ DEFAULT_SESSION_VALUES = {
     "image_memory_answer_phase": False,
     "image_memory_selected": [],
 
+    # Face-Name Memory Match Game state (face-name association recall).
+    "face_name_round": 0,
+    "face_name_total_score": 0.0,
+    "face_name_pairs": [],
+    "face_name_shuffled": [],
+    "face_name_start_time": None,
+    "face_name_answer_phase": False,
+
+    # Category Naming Challenge (Semantic Fluency Test) state.
+    "fluency_round": 0,
+    "fluency_total_score": 0.0,
+    "fluency_category": None,
+    "fluency_used_categories": [],
+    "fluency_start_time": None,
+
     # Visible result message shown after a completed game.
     "game_result_message": None,
     "game_result_score": None,
@@ -4384,6 +4399,25 @@ def reset_image_memory_game():
     st.session_state.image_memory_selected = []
 
 
+def reset_face_name_game():
+    """Reset all state for the Face-Name Memory Match game."""
+    st.session_state.face_name_round = 0
+    st.session_state.face_name_total_score = 0.0
+    st.session_state.face_name_pairs = []
+    st.session_state.face_name_shuffled = []
+    st.session_state.face_name_start_time = None
+    st.session_state.face_name_answer_phase = False
+
+
+def reset_fluency_game():
+    """Reset all state for the Category Naming (Semantic Fluency) game."""
+    st.session_state.fluency_round = 0
+    st.session_state.fluency_total_score = 0.0
+    st.session_state.fluency_category = None
+    st.session_state.fluency_used_categories = []
+    st.session_state.fluency_start_time = None
+
+
 def exit_current_game(game_name):
     if game_name == "Memory Sequence":
         reset_memory_game()
@@ -4393,6 +4427,10 @@ def exit_current_game(game_name):
         reset_attention_game()
     elif game_name == "Image Recognition":
         reset_image_memory_game()
+    elif game_name == "Face-Name Memory":
+        reset_face_name_game()
+    elif game_name == "Category Naming":
+        reset_fluency_game()
 
     queue_voice(
         f"You exited the {game_name}. The unfinished game was not saved.",
@@ -4628,6 +4666,208 @@ def save_image_game_result(final_score, old_difficulty, new_difficulty):
 
 
 # ============================================================
+# FACE-NAME MEMORY MATCH GAME ASSETS
+# ============================================================
+#
+# Face-name association recall is one of the most common early
+# real-world memory complaints in dementia patients (forgetting
+# names of people they just met). This game shows face+name
+# cards for 10 seconds, hides the names, then asks the patient
+# to match each face back to the correct name - same 10-second
+# viewing pattern already used in the Image Recognition game.
+# ============================================================
+
+FACE_NAME_POOL = [
+    {"id": "p1",  "name": "Anjali",   "emoji": "👩🏽",       "bg": "#FCE7F3"},
+    {"id": "p2",  "name": "Bipul",    "emoji": "👨🏽",       "bg": "#E0F2FE"},
+    {"id": "p3",  "name": "Chingnu",  "emoji": "🧔🏽",       "bg": "#FEF3C7"},
+    {"id": "p4",  "name": "Deben",    "emoji": "👴🏽",       "bg": "#DCFCE7"},
+    {"id": "p5",  "name": "Elina",    "emoji": "👵🏽",       "bg": "#EDE9FE"},
+    {"id": "p6",  "name": "Farida",   "emoji": "🧕🏽",       "bg": "#FFE4E6"},
+    {"id": "p7",  "name": "Gyaltsen", "emoji": "👨🏻",       "bg": "#E0E7FF"},
+    {"id": "p8",  "name": "Hemanta",  "emoji": "👨🏽‍🦳",     "bg": "#CCFBF1"},
+    {"id": "p9",  "name": "Ibemhal",  "emoji": "👩🏽‍🦱",     "bg": "#FEF9C3"},
+    {"id": "p10", "name": "Joseph",   "emoji": "👨🏽‍🦲",     "bg": "#E2E8F0"},
+    {"id": "p11", "name": "Kavita",   "emoji": "👩🏻",       "bg": "#FFEDD5"},
+    {"id": "p12", "name": "Lalrin",   "emoji": "👩🏻‍🦰",     "bg": "#D1FAE5"},
+]
+
+FACE_NAME_DIFFICULTY = {
+    1: {"pair_count": 4},
+    2: {"pair_count": 6},
+    3: {"pair_count": 8},
+}
+
+
+def face_name_card_html(person, show_name=True, compact=False):
+    """Return a face+name card for the Face-Name Memory Match game."""
+    width = 110 if compact else 140
+    height = 130 if compact else 155
+    emoji_size = 46 if compact else 60
+    label_size = 13 if compact else 16
+
+    name_html = (
+        f"""<div style="margin-top:8px;font-weight:800;font-size:{label_size}px;color:#1E293B;text-align:center;">{person['name']}</div>"""
+        if show_name else ""
+    )
+
+    return f"""
+    <div style="
+        width:{width}px;
+        min-height:{height}px;
+        border-radius:18px;
+        padding:10px;
+        box-sizing:border-box;
+        background:{person['bg']};
+        border:2px solid rgba(79,70,229,.18);
+        display:flex;
+        flex-direction:column;
+        justify-content:center;
+        align-items:center;
+        box-shadow:0 6px 18px rgba(15,23,42,.10);
+        margin:auto;
+    ">
+        <div style="font-size:{emoji_size}px;line-height:1.1;">{person['emoji']}</div>
+        {name_html}
+    </div>
+    """
+
+
+def render_face_name_cards(people, show_name=True, compact=False):
+    """Render face-name cards in a centered responsive flex container."""
+    cards = "".join(
+        face_name_card_html(person, show_name=show_name, compact=compact)
+        for person in people
+    )
+    return f"""
+    <div style="display:flex;flex-wrap:wrap;justify-content:center;align-items:center;gap:14px;width:100%;padding:8px 0;">
+        {cards}
+    </div>
+    """
+
+
+def face_name_countdown_banner(seconds_remaining):
+    """Large, readable countdown badge for the Face-Name Memory game."""
+    if seconds_remaining <= 0:
+        return """
+        <div style="display:block;width:max-content;margin:8px auto;padding:10px 20px;border-radius:999px;background:#DCFCE7;color:#166534;font-weight:900;font-size:18px;border:2px solid #86EFAC;">
+            ✅ 0 seconds - names hidden
+        </div>
+        """
+    return f"""
+    <div style="display:block;width:max-content;min-width:130px;margin:8px auto;padding:10px 22px;border-radius:999px;background:#3730A3;color:white;font-weight:900;text-align:center;font-size:21px;border:2px solid #818CF8;box-shadow:0 5px 18px rgba(55,48,163,.25);">
+        ⏱️ {seconds_remaining} seconds
+    </div>
+    """
+
+
+def face_name_remaining_seconds():
+    """Calculate remaining 10-second viewing time without time.sleep()."""
+    start = st.session_state.get("face_name_start_time")
+    if start is None:
+        return 0
+    elapsed = pytime.time() - float(start)
+    return max(0, 10 - int(elapsed))
+
+
+def prepare_face_name_round(difficulty_level, round_number):
+    """Pick a fresh set of face-name pairs for a new round."""
+    config = FACE_NAME_DIFFICULTY[difficulty_level]
+    people = random.sample(FACE_NAME_POOL, config["pair_count"])
+
+    st.session_state.face_name_pairs = people
+    st.session_state.face_name_shuffled = []
+    st.session_state.face_name_round = round_number
+    st.session_state.face_name_total_score = st.session_state.get("face_name_total_score", 0.0)
+    st.session_state.face_name_start_time = pytime.time()
+    st.session_state.face_name_answer_phase = False
+
+
+# ============================================================
+# CATEGORY NAMING CHALLENGE (SEMANTIC FLUENCY TEST) ASSETS
+# ============================================================
+#
+# This mirrors the real "Category / Verbal Fluency Test" used in
+# actual dementia screening (e.g. MoCA, ACE-III): patient must
+# name as many items as possible from a category within a time
+# limit. Semantic fluency decline is a well-documented early
+# marker of dementia. Scoring checks typed words (comma/space
+# separated) against a curated word bank per category.
+# ============================================================
+
+CATEGORY_FLUENCY_BANK = {
+    "Fruits": ["apple", "banana", "mango", "orange", "grape", "papaya", "guava",
+               "pineapple", "watermelon", "lychee", "kiwi", "pomegranate",
+               "lemon", "coconut", "jackfruit"],
+    "Animals": ["dog", "cat", "cow", "elephant", "tiger", "lion", "horse",
+                "goat", "deer", "monkey", "rabbit", "buffalo", "pig",
+                "sheep", "bear"],
+    "Vegetables": ["potato", "tomato", "onion", "carrot", "cabbage", "spinach",
+                   "brinjal", "cauliflower", "peas", "pumpkin", "cucumber",
+                   "beans", "radish", "garlic", "ginger"],
+    "Household Items": ["chair", "table", "bed", "spoon", "plate", "cup",
+                         "broom", "pillow", "blanket", "clock", "mirror",
+                         "lamp", "bucket", "towel", "fan"],
+    "North East Indian States": ["assam", "meghalaya", "manipur", "nagaland",
+                                  "mizoram", "tripura", "sikkim",
+                                  "arunachal pradesh"],
+}
+
+FLUENCY_TOTAL_ROUNDS = 3
+
+FLUENCY_DIFFICULTY = {
+    1: {"time_limit": 60, "target_count": 5},
+    2: {"time_limit": 45, "target_count": 7},
+    3: {"time_limit": 30, "target_count": 9},
+}
+
+
+def fluency_timer_banner(seconds_remaining):
+    """Countdown badge for the Category Naming Challenge."""
+    if seconds_remaining <= 0:
+        return """
+        <div style="display:block;width:max-content;margin:8px auto;padding:10px 20px;border-radius:999px;background:#FEE2E2;color:#991B1B;font-weight:900;font-size:18px;border:2px solid #FCA5A5;">
+            ⏰ Time's up!
+        </div>
+        """
+    return f"""
+    <div style="display:block;width:max-content;min-width:130px;margin:8px auto;padding:10px 22px;border-radius:999px;background:#065F46;color:white;font-weight:900;text-align:center;font-size:21px;border:2px solid #34D399;box-shadow:0 5px 18px rgba(6,95,70,.25);">
+        ⏱️ {seconds_remaining} seconds left
+    </div>
+    """
+
+
+def start_fluency_round(round_number):
+    """Pick a category not yet used this session and start the timer."""
+    used = st.session_state.get("fluency_used_categories", [])
+    available = [c for c in CATEGORY_FLUENCY_BANK if c not in used]
+
+    if not available:
+        available = list(CATEGORY_FLUENCY_BANK.keys())
+        used = []
+
+    category = random.choice(available)
+
+    st.session_state.fluency_category = category
+    st.session_state.fluency_used_categories = used + [category]
+    st.session_state.fluency_round = round_number
+    st.session_state.fluency_start_time = pytime.time()
+
+
+def save_fluency_game_result(final_score, old_difficulty, new_difficulty):
+    """Save a completed fluency game and populate the result banner."""
+    rounded_score = round(float(final_score), 1)
+    save_completed_game("Category Naming", rounded_score)
+
+    st.session_state.game_result_message = game_result_voice(
+        "Category Naming Challenge", rounded_score, old_difficulty, new_difficulty, language
+    )
+    st.session_state.game_result_score = rounded_score
+    st.session_state.game_result_old_difficulty = old_difficulty
+    st.session_state.game_result_new_difficulty = new_difficulty
+
+
+# ============================================================
 # PATIENT HOME
 # ============================================================
 
@@ -4836,7 +5076,9 @@ elif selected_page == "games":
             "Memory Sequence",
             "Pattern Memory",
             "Attention Game",
-            "Image Recognition"
+            "Image Recognition",
+            "Face-Name Memory",
+            "Category Naming"
         ],
         key="active_game",
         horizontal=True,
@@ -4844,7 +5086,9 @@ elif selected_page == "games":
             "Memory Sequence": "🧠 Memory Sequence",
             "Pattern Memory": "🔷 Pattern Memory",
             "Attention Game": "⚡ Attention Game",
-            "Image Recognition": "🖼️ Image Recognition"
+            "Image Recognition": "🖼️ Image Recognition",
+            "Face-Name Memory": "🧑‍🤝‍🧑 Face-Name Memory",
+            "Category Naming": "🗣️ Category Naming"
         }[x]
     )
 
@@ -5698,6 +5942,385 @@ elif selected_page == "games":
                                 )
 
                                 st.rerun()
+
+    # ========================================================
+    # FACE-NAME MEMORY MATCH
+    # ========================================================
+
+    if active_game == "Face-Name Memory":
+
+        st.subheader("🧑‍🤝‍🧑 Face-Name Memory Match")
+
+        face_name_config = FACE_NAME_DIFFICULTY[difficulty]
+        pair_count = face_name_config["pair_count"]
+
+        st.write(
+            f"Remember {pair_count} faces and their names. "
+            "They remain visible for exactly 10 seconds. "
+            "Then match each face back to the correct name."
+        )
+
+        st.info(
+            "🧠 This exercise trains face-name recall, one of the most common "
+            "everyday memory challenges in dementia — remembering the names "
+            "of people you just met."
+        )
+
+        # ----------------------------------------------------
+        # START FACE-NAME GAME
+        # ----------------------------------------------------
+        if st.session_state.face_name_round == 0:
+
+            st.markdown(
+                f"### 🎯 {total_rounds} rounds | {pair_count} faces to remember"
+            )
+
+            if st.button(
+                "▶️ Start Face-Name Game",
+                type="primary",
+                key="face_name_start",
+                use_container_width=True
+            ):
+
+                st.session_state.face_name_total_score = 0.0
+
+                prepare_face_name_round(difficulty, 1)
+
+                queue_voice(
+                    f"Face Name Memory game started. Round 1 of {total_rounds}. "
+                    f"Remember {pair_count} faces and names for 10 seconds.",
+                    language
+                )
+
+                st.rerun()
+
+        # ----------------------------------------------------
+        # ACTIVE FACE-NAME GAME
+        # ----------------------------------------------------
+        else:
+
+            current_round = st.session_state.face_name_round
+            people = st.session_state.face_name_pairs
+
+            st.progress(
+                current_round / total_rounds,
+                text=f"Round {current_round} of {total_rounds}"
+            )
+
+            remaining = face_name_remaining_seconds()
+
+            # ------------------------------------------------
+            # VIEWING PHASE
+            # ------------------------------------------------
+            if remaining > 0:
+
+                st.session_state.face_name_answer_phase = False
+
+                st.markdown("### 👀 Memorize these faces and names")
+
+                st.markdown(
+                    render_face_name_cards(people, show_name=True),
+                    unsafe_allow_html=True
+                )
+
+                st.markdown(
+                    face_name_countdown_banner(remaining),
+                    unsafe_allow_html=True
+                )
+
+                st.caption("🔒 Answer controls are locked until the countdown reaches 0.")
+
+                if st_autorefresh is not None:
+                    st_autorefresh(
+                        interval=1000,
+                        limit=11,
+                        key=f"face_name_timer_{user_id}_{current_round}"
+                    )
+                else:
+                    st.error(
+                        "Countdown dependency is missing. "
+                        "Install streamlit-autorefresh and restart the app."
+                    )
+
+            # ------------------------------------------------
+            # ANSWER PHASE
+            # ------------------------------------------------
+            else:
+
+                if not st.session_state.face_name_answer_phase:
+                    st.session_state.face_name_answer_phase = True
+                    shuffled = people[:]
+                    random.shuffle(shuffled)
+                    st.session_state.face_name_shuffled = shuffled
+                    st.rerun()
+
+                st.markdown(face_name_countdown_banner(0), unsafe_allow_html=True)
+
+                st.success("✅ Time is up! Names are hidden. Match each face to its name.")
+
+                shuffled_people = st.session_state.face_name_shuffled
+                name_options = ["Select a name..."] + [p["name"] for p in people]
+
+                user_answers = {}
+                answer_columns = st.columns(4)
+
+                for index, person in enumerate(shuffled_people):
+
+                    with answer_columns[index % 4]:
+
+                        st.markdown(
+                            render_face_name_cards([person], show_name=False, compact=True),
+                            unsafe_allow_html=True
+                        )
+
+                        chosen_name = st.selectbox(
+                            "Who is this?",
+                            name_options,
+                            key=f"face_name_select_{user_id}_{current_round}_{person['id']}"
+                        )
+
+                        user_answers[person["id"]] = chosen_name
+
+                answered_count = sum(
+                    1 for v in user_answers.values() if v != "Select a name..."
+                )
+
+                st.markdown(f"**Answered: {answered_count} / {pair_count}**")
+
+                exit_col, submit_col = st.columns(2)
+
+                with exit_col:
+                    if st.button(
+                        "🚪 Exit Game",
+                        key=f"face_name_exit_{current_round}",
+                        use_container_width=True
+                    ):
+                        exit_current_game("Face-Name Memory")
+
+                with submit_col:
+                    if st.button(
+                        "✅ Submit Round",
+                        key=f"face_name_submit_{current_round}",
+                        type="primary",
+                        use_container_width=True
+                    ):
+
+                        if answered_count != pair_count:
+                            st.error(f"Please match all {pair_count} faces before submitting.")
+                        else:
+
+                            correct = sum(
+                                user_answers[person["id"]] == person["name"]
+                                for person in shuffled_people
+                            )
+
+                            round_score = (correct / pair_count) * 100
+                            st.session_state.face_name_total_score += round_score
+
+                            st.success(
+                                f"Round {current_round}: {correct} of {pair_count} "
+                                f"correct ({round_score:.0f}/100)."
+                            )
+
+                            if current_round >= total_rounds:
+
+                                final_score = st.session_state.face_name_total_score / total_rounds
+
+                                old_difficulty, new_difficulty, result = update_adaptive_difficulty(
+                                    user_id, final_score
+                                )
+
+                                rounded_score = round(final_score, 1)
+                                save_completed_game("Face-Name Memory", rounded_score)
+
+                                st.session_state.game_result_message = game_result_voice(
+                                    "Face-Name Memory Game", rounded_score,
+                                    old_difficulty, new_difficulty, language
+                                )
+                                st.session_state.game_result_score = rounded_score
+                                st.session_state.game_result_old_difficulty = old_difficulty
+                                st.session_state.game_result_new_difficulty = new_difficulty
+
+                                reset_face_name_game()
+
+                                queue_voice(
+                                    game_result_voice(
+                                        "Face-Name Memory Game", rounded_score,
+                                        old_difficulty, new_difficulty, language
+                                    ),
+                                    language
+                                )
+
+                                st.rerun()
+
+                            else:
+                                next_round = current_round + 1
+                                prepare_face_name_round(difficulty, next_round)
+
+                                queue_voice(
+                                    f"Round {current_round} completed. "
+                                    f"Starting round {next_round} of {total_rounds}.",
+                                    language
+                                )
+
+                                st.rerun()
+
+    # ========================================================
+    # CATEGORY NAMING CHALLENGE (SEMANTIC FLUENCY TEST)
+    # ========================================================
+
+    if active_game == "Category Naming":
+
+        st.subheader("🗣️ Category Naming Challenge")
+
+        fluency_config = FLUENCY_DIFFICULTY[difficulty]
+        time_limit = fluency_config["time_limit"]
+        target_count = fluency_config["target_count"]
+
+        st.write(
+            f"Name as many items as you can from a category within the time limit. "
+            f"You will play {FLUENCY_TOTAL_ROUNDS} rounds."
+        )
+
+        st.info(
+            "🧠 This is based on the real Category Fluency Test used in dementia "
+            "screening — semantic word recall speed is a well-known early "
+            "indicator of cognitive decline."
+        )
+
+        # ----------------------------------------------------
+        # START FLUENCY GAME
+        # ----------------------------------------------------
+        if st.session_state.fluency_round == 0:
+
+            st.markdown(
+                f"### 🎯 {FLUENCY_TOTAL_ROUNDS} rounds | {time_limit} seconds per round"
+            )
+
+            if st.button(
+                "▶️ Start Category Naming Game",
+                type="primary",
+                key="fluency_start",
+                use_container_width=True
+            ):
+
+                st.session_state.fluency_total_score = 0.0
+                st.session_state.fluency_used_categories = []
+                start_fluency_round(1)
+
+                queue_voice(
+                    f"Category Naming game started. Round 1 of {FLUENCY_TOTAL_ROUNDS}. "
+                    f"You have {time_limit} seconds.",
+                    language
+                )
+
+                st.rerun()
+
+        # ----------------------------------------------------
+        # ACTIVE FLUENCY GAME
+        # ----------------------------------------------------
+        else:
+
+            current_round = st.session_state.fluency_round
+            category = st.session_state.fluency_category
+            elapsed = pytime.time() - float(st.session_state.fluency_start_time)
+            remaining = max(0, int(time_limit - elapsed))
+
+            st.progress(
+                current_round / FLUENCY_TOTAL_ROUNDS,
+                text=f"Round {current_round} of {FLUENCY_TOTAL_ROUNDS}"
+            )
+
+            st.success(f"Name as many **{category}** as you can!")
+
+            st.markdown(fluency_timer_banner(remaining), unsafe_allow_html=True)
+
+            response_key = f"fluency_input_{user_id}_{current_round}"
+
+            user_text = st.text_area(
+                "Type the words, separated by comma or space",
+                key=response_key,
+                height=100,
+                disabled=(remaining <= 0)
+            )
+
+            if remaining > 0 and st_autorefresh is not None:
+                st_autorefresh(
+                    interval=1000,
+                    limit=time_limit + 2,
+                    key=f"fluency_timer_{user_id}_{current_round}"
+                )
+            elif remaining <= 0:
+                st.warning("⏰ Time's up! Review your words and submit.")
+
+            exit_col, submit_col = st.columns(2)
+
+            with exit_col:
+                if st.button(
+                    "🚪 Exit Game",
+                    key=f"fluency_exit_{current_round}",
+                    use_container_width=True
+                ):
+                    exit_current_game("Category Naming")
+
+            with submit_col:
+                if st.button(
+                    "✅ Submit Round",
+                    key=f"fluency_submit_{current_round}",
+                    type="primary",
+                    use_container_width=True
+                ):
+
+                    tokens = re.split(r"[,\s]+", (user_text or "").strip().lower())
+                    unique_words = {t for t in tokens if t}
+
+                    valid_bank = set(CATEGORY_FLUENCY_BANK[category])
+                    correct_words = unique_words & valid_bank
+
+                    round_score = min(100, (len(correct_words) / target_count) * 100)
+                    st.session_state.fluency_total_score += round_score
+
+                    st.success(
+                        f"Round {current_round}: {len(correct_words)} valid "
+                        f"{category.lower()} named ({round_score:.0f}/100)."
+                    )
+
+                    if correct_words:
+                        st.caption("Counted: " + ", ".join(sorted(correct_words)))
+
+                    if current_round >= FLUENCY_TOTAL_ROUNDS:
+
+                        final_score = st.session_state.fluency_total_score / FLUENCY_TOTAL_ROUNDS
+
+                        old_difficulty, new_difficulty, result = update_adaptive_difficulty(
+                            user_id, final_score
+                        )
+
+                        save_fluency_game_result(final_score, old_difficulty, new_difficulty)
+
+                        reset_fluency_game()
+
+                        queue_voice(
+                            game_result_voice(
+                                "Category Naming Challenge", round(final_score, 1),
+                                old_difficulty, new_difficulty, language
+                            ),
+                            language
+                        )
+
+                        st.rerun()
+
+                    else:
+                        next_round = current_round + 1
+                        start_fluency_round(next_round)
+
+                        queue_voice(
+                            f"Round {current_round} completed. "
+                            f"Starting round {next_round} of {FLUENCY_TOTAL_ROUNDS}.",
+                            language
+                        )
+
+                        st.rerun()
 
 
 # ============================================================
