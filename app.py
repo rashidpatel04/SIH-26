@@ -893,15 +893,21 @@ def get_turso_credentials():
     return turso_url, turso_token
 
 
-# @st.cache_resource makes Streamlit create this connection (and run the
-# CREATE TABLE / ALTER TABLE / migration checks below) only ONCE, the
-# first time the app starts - not on every single click or game switch.
-# Without this, every rerun re-ran all those setup queries, and with a
-# remote Turso database each one is a network round-trip, which is what
-# was causing the noticeable delay when switching games.
-@st.cache_resource
-def get_connection():
+# Turso's remote connection uses a stateful HTTP "stream" under the hood.
+# If that stream sits idle too long between app interactions, Turso closes
+# it server-side - but a cached, long-lived connection object doesn't know
+# that and tries to reuse the now-dead stream, causing
+# "stream not found" / "stream was idle too long" crashes.
+#
+# Fix: create a brand-new, short-lived connection on every script rerun
+# (cheap - it's just an HTTP client, no persistent socket to go stale),
+# but still only run the CREATE TABLE / ALTER TABLE / migration checks
+# ONCE per app lifetime via a separate cached function. This keeps the
+# earlier speed fix (schema setup not repeated on every click) while
+# fixing the idle-stream crash.
 
+def _open_raw_connection():
+    """Open a brand-new database connection (no schema setup)."""
     turso_url, turso_token = get_turso_credentials()
 
     if libsql is not None and turso_url and turso_token:
@@ -929,6 +935,20 @@ def get_connection():
         # HTTP - safe to skip, the app does not rely on cascading
         # foreign key deletes anywhere.
         pass
+
+    return connection
+
+
+@st.cache_resource
+def _ensure_schema_ready():
+    """
+    Run all CREATE TABLE / ALTER TABLE / migration statements exactly
+    once per app lifetime, using a short-lived connection of its own
+    that is closed immediately afterwards (so it never lingers around
+    long enough for its stream to go idle and expire).
+    """
+
+    connection = _open_raw_connection()
 
     # --------------------------------------------------------
     # KEEP ORIGINAL USERS TABLE + ADD PROVIDER ONBOARDING FIELDS
@@ -1043,7 +1063,24 @@ def get_connection():
 
     connection.commit()
 
-    return connection
+    try:
+        connection.close()
+    except Exception:
+        # Some connection modes may not support close() - harmless,
+        # this connection is only used for the one-time setup above.
+        pass
+
+    return True
+
+
+def get_connection():
+    """
+    Return a fresh, short-lived database connection. Schema setup runs
+    only once (cached), but the connection itself is created new every
+    time this is called, so it can never be a stale/idle Turso stream.
+    """
+    _ensure_schema_ready()
+    return _open_raw_connection()
 
 
 conn = get_connection()
