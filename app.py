@@ -52,7 +52,7 @@
 #
 # INSTALL:
 #
-# pip install streamlit gTTS SpeechRecognition streamlit-mic-recorder reportlab pandas streamlit-autorefresh libsql
+# pip install streamlit gTTS SpeechRecognition streamlit-mic-recorder reportlab pandas streamlit-autorefresh
 #
 # RUN:
 #
@@ -62,21 +62,6 @@
 
 import streamlit as st
 import sqlite3
-
-# libsql (Turso) gives us a persistent cloud database using the SAME
-# sqlite3-style API (execute, fetchone, fetchall, commit). This fixes
-# the "users have to re-register after a few days" bug: Streamlit
-# Community Cloud wipes any local file on every restart, so a plain
-# local mindsetu_ner.db file never survives for long. If Turso
-# credentials are configured in st.secrets, we connect to that
-# persistent cloud database instead of the local file. If they are
-# not configured (e.g. while developing on your own laptop), we fall
-# back to the local file exactly like before - nothing breaks.
-try:
-    import libsql
-except ImportError:
-    libsql = None
-
 import random
 import hashlib
 import io
@@ -881,74 +866,14 @@ def build_patient_progress_pdf(patient_id):
 DB_NAME = "mindsetu_ner.db"
 
 
-def get_turso_credentials():
-    """Read Turso database credentials from Streamlit secrets, if configured."""
-    try:
-        turso_url = st.secrets.get("TURSO_DATABASE_URL", "")
-        turso_token = st.secrets.get("TURSO_AUTH_TOKEN", "")
-    except Exception:
-        turso_url = ""
-        turso_token = ""
+def get_connection():
 
-    return turso_url, turso_token
+    connection = sqlite3.connect(
+        DB_NAME,
+        check_same_thread=False
+    )
 
-
-# Turso's remote connection uses a stateful HTTP "stream" under the hood.
-# If that stream sits idle too long between app interactions, Turso closes
-# it server-side - but a cached, long-lived connection object doesn't know
-# that and tries to reuse the now-dead stream, causing
-# "stream not found" / "stream was idle too long" crashes.
-#
-# Fix: create a brand-new, short-lived connection on every script rerun
-# (cheap - it's just an HTTP client, no persistent socket to go stale),
-# but still only run the CREATE TABLE / ALTER TABLE / migration checks
-# ONCE per app lifetime via a separate cached function. This keeps the
-# earlier speed fix (schema setup not repeated on every click) while
-# fixing the idle-stream crash.
-
-def _open_raw_connection():
-    """Open a brand-new database connection (no schema setup)."""
-    turso_url, turso_token = get_turso_credentials()
-
-    if libsql is not None and turso_url and turso_token:
-        # Persistent cloud database (Turso). Data survives app restarts,
-        # redeploys, and Streamlit Community Cloud sleep/wake cycles.
-        connection = libsql.connect(
-            database=turso_url,
-            auth_token=turso_token
-        )
-    else:
-        # Local fallback (used only when Turso secrets are not set,
-        # e.g. running on your own laptop for quick testing). On
-        # Streamlit Community Cloud this file does NOT persist across
-        # restarts - configure TURSO_DATABASE_URL / TURSO_AUTH_TOKEN
-        # in the app's Secrets to fix that permanently.
-        connection = sqlite3.connect(
-            DB_NAME,
-            check_same_thread=False
-        )
-
-    try:
-        connection.execute("PRAGMA foreign_keys = ON")
-    except Exception:
-        # Not all libsql connection modes support this PRAGMA over
-        # HTTP - safe to skip, the app does not rely on cascading
-        # foreign key deletes anywhere.
-        pass
-
-    return connection
-
-
-@st.cache_resource
-def _ensure_schema_ready():
-    """
-    Run all CREATE TABLE / ALTER TABLE / migration statements exactly
-    once per app lifetime, using a short-lived connection of its own
-    that is closed immediately afterwards (so it never lingers around
-    long enough for its stream to go idle and expire).
-    """
-
-    connection = _open_raw_connection()
+    connection.execute("PRAGMA foreign_keys = ON")
 
     # --------------------------------------------------------
     # KEEP ORIGINAL USERS TABLE + ADD PROVIDER ONBOARDING FIELDS
@@ -1063,37 +988,10 @@ def _ensure_schema_ready():
 
     connection.commit()
 
-    try:
-        connection.close()
-    except Exception:
-        # Some connection modes may not support close() - harmless,
-        # this connection is only used for the one-time setup above.
-        pass
-
-    return True
-
-
-def get_connection():
-    """
-    Return a fresh, short-lived database connection. Schema setup runs
-    only once (cached), but the connection itself is created new every
-    time this is called, so it can never be a stale/idle Turso stream.
-    """
-    _ensure_schema_ready()
-    return _open_raw_connection()
+    return connection
 
 
 conn = get_connection()
-
-# One-time visible reminder if Turso is not configured, so the team
-# notices the persistence issue instead of rediscovering it days later.
-_turso_url_check, _turso_token_check = get_turso_credentials()
-if libsql is None or not _turso_url_check or not _turso_token_check:
-    st.sidebar.warning(
-        "⚠️ Persistent database not configured. Accounts will be "
-        "lost on the next app restart. Add TURSO_DATABASE_URL and "
-        "TURSO_AUTH_TOKEN in Streamlit Cloud → Settings → Secrets."
-    )
 
 
 # ============================================================
@@ -1946,6 +1844,13 @@ DEFAULT_SESSION_VALUES = {
     "face_name_shuffled": [],
     "face_name_start_time": None,
     "face_name_answer_phase": False,
+
+    # Category Naming Challenge (Semantic Fluency Test) state.
+    "fluency_round": 0,
+    "fluency_total_score": 0.0,
+    "fluency_category": None,
+    "fluency_used_categories": [],
+    "fluency_start_time": None,
 
     # Visible result message shown after a completed game.
     "game_result_message": None,
@@ -4438,26 +4343,14 @@ if current_page not in page_keys:
     current_page = "home"
 
 
-# The navigation radio previously had no `key` and was given a fresh
-# `index=` computed from session_state on every rerun. Streamlit bakes
-# that `index` into the widget's internal identity, so every time it
-# changed, the widget was treated as a brand-new widget and your click
-# was silently dropped - that's why it took two clicks to switch tabs.
-# Giving it a stable `key` and only pre-seeding that key when something
-# else (like a "Go to Games" shortcut button) changes st.session_state.page
-# fixes this: normal clicks now register in a single click.
-if "main_nav_radio" not in st.session_state:
-    st.session_state.main_nav_radio = current_page
-elif st.session_state.main_nav_radio != current_page:
-    st.session_state.main_nav_radio = current_page
-
-
 selected_page = st.radio(
     "Navigation",
     page_keys,
     format_func=lambda key: page_names[key],
     horizontal=True,
-    key="main_nav_radio"
+    index=page_keys.index(
+        current_page
+    )
 )
 
 
@@ -4516,6 +4409,15 @@ def reset_face_name_game():
     st.session_state.face_name_answer_phase = False
 
 
+def reset_fluency_game():
+    """Reset all state for the Category Naming (Semantic Fluency) game."""
+    st.session_state.fluency_round = 0
+    st.session_state.fluency_total_score = 0.0
+    st.session_state.fluency_category = None
+    st.session_state.fluency_used_categories = []
+    st.session_state.fluency_start_time = None
+
+
 def exit_current_game(game_name):
     if game_name == "Memory Sequence":
         reset_memory_game()
@@ -4527,6 +4429,8 @@ def exit_current_game(game_name):
         reset_image_memory_game()
     elif game_name == "Face-Name Memory":
         reset_face_name_game()
+    elif game_name == "Category Naming":
+        reset_fluency_game()
 
     queue_voice(
         f"You exited the {game_name}. The unfinished game was not saved.",
@@ -4880,6 +4784,90 @@ def prepare_face_name_round(difficulty_level, round_number):
 
 
 # ============================================================
+# CATEGORY NAMING CHALLENGE (SEMANTIC FLUENCY TEST) ASSETS
+# ============================================================
+#
+# This mirrors the real "Category / Verbal Fluency Test" used in
+# actual dementia screening (e.g. MoCA, ACE-III): patient must
+# name as many items as possible from a category within a time
+# limit. Semantic fluency decline is a well-documented early
+# marker of dementia. Scoring checks typed words (comma/space
+# separated) against a curated word bank per category.
+# ============================================================
+
+CATEGORY_FLUENCY_BANK = {
+    "Fruits": ["apple", "banana", "mango", "orange", "grape", "papaya", "guava",
+               "pineapple", "watermelon", "lychee", "kiwi", "pomegranate",
+               "lemon", "coconut", "jackfruit"],
+    "Animals": ["dog", "cat", "cow", "elephant", "tiger", "lion", "horse",
+                "goat", "deer", "monkey", "rabbit", "buffalo", "pig",
+                "sheep", "bear"],
+    "Vegetables": ["potato", "tomato", "onion", "carrot", "cabbage", "spinach",
+                   "brinjal", "cauliflower", "peas", "pumpkin", "cucumber",
+                   "beans", "radish", "garlic", "ginger"],
+    "Household Items": ["chair", "table", "bed", "spoon", "plate", "cup",
+                         "broom", "pillow", "blanket", "clock", "mirror",
+                         "lamp", "bucket", "towel", "fan"],
+    "North East Indian States": ["assam", "meghalaya", "manipur", "nagaland",
+                                  "mizoram", "tripura", "sikkim",
+                                  "arunachal pradesh"],
+}
+
+FLUENCY_TOTAL_ROUNDS = 3
+
+FLUENCY_DIFFICULTY = {
+    1: {"time_limit": 60, "target_count": 5},
+    2: {"time_limit": 45, "target_count": 7},
+    3: {"time_limit": 30, "target_count": 9},
+}
+
+
+def fluency_timer_banner(seconds_remaining):
+    """Countdown badge for the Category Naming Challenge."""
+    if seconds_remaining <= 0:
+        return """
+        <div style="display:block;width:max-content;margin:8px auto;padding:10px 20px;border-radius:999px;background:#FEE2E2;color:#991B1B;font-weight:900;font-size:18px;border:2px solid #FCA5A5;">
+            ⏰ Time's up!
+        </div>
+        """
+    return f"""
+    <div style="display:block;width:max-content;min-width:130px;margin:8px auto;padding:10px 22px;border-radius:999px;background:#065F46;color:white;font-weight:900;text-align:center;font-size:21px;border:2px solid #34D399;box-shadow:0 5px 18px rgba(6,95,70,.25);">
+        ⏱️ {seconds_remaining} seconds left
+    </div>
+    """
+
+
+def start_fluency_round(round_number):
+    """Pick a category not yet used this session and start the timer."""
+    used = st.session_state.get("fluency_used_categories", [])
+    available = [c for c in CATEGORY_FLUENCY_BANK if c not in used]
+
+    if not available:
+        available = list(CATEGORY_FLUENCY_BANK.keys())
+        used = []
+
+    category = random.choice(available)
+
+    st.session_state.fluency_category = category
+    st.session_state.fluency_used_categories = used + [category]
+    st.session_state.fluency_round = round_number
+    st.session_state.fluency_start_time = pytime.time()
+
+
+def save_fluency_game_result(final_score, old_difficulty, new_difficulty):
+    """Save a completed fluency game and populate the result banner."""
+    rounded_score = round(float(final_score), 1)
+    save_completed_game("Category Naming", rounded_score)
+
+    st.session_state.game_result_message = game_result_voice(
+        "Category Naming Challenge", rounded_score, old_difficulty, new_difficulty, language
+    )
+    st.session_state.game_result_score = rounded_score
+    st.session_state.game_result_old_difficulty = old_difficulty
+    st.session_state.game_result_new_difficulty = new_difficulty
+
+
+# ============================================================
 # PATIENT HOME
 # ============================================================
 
@@ -5089,7 +5077,8 @@ elif selected_page == "games":
             "Pattern Memory",
             "Attention Game",
             "Image Recognition",
-            "Face-Name Memory"
+            "Face-Name Memory",
+            "Category Naming"
         ],
         key="active_game",
         horizontal=True,
@@ -5098,7 +5087,8 @@ elif selected_page == "games":
             "Pattern Memory": "🔷 Pattern Memory",
             "Attention Game": "⚡ Attention Game",
             "Image Recognition": "🖼️ Image Recognition",
-            "Face-Name Memory": "🧑‍🤝‍🧑 Face-Name Memory"
+            "Face-Name Memory": "🧑‍🤝‍🧑 Face-Name Memory",
+            "Category Naming": "🗣️ Category Naming"
         }[x]
     )
 
@@ -6193,6 +6183,190 @@ elif selected_page == "games":
 
                                 st.rerun()
 
+    # ========================================================
+    # CATEGORY NAMING CHALLENGE (SEMANTIC FLUENCY TEST)
+    # ========================================================
+
+    if active_game == "Category Naming":
+
+        st.subheader("🗣️ Category Naming Challenge")
+
+        fluency_config = FLUENCY_DIFFICULTY[difficulty]
+        time_limit = fluency_config["time_limit"]
+        target_count = fluency_config["target_count"]
+
+        st.write(
+            f"Name as many items as you can from a category within the time limit. "
+            f"You will play {FLUENCY_TOTAL_ROUNDS} rounds."
+        )
+
+        st.info(
+            "🧠 This is based on the real Category Fluency Test used in dementia "
+            "screening — semantic word recall speed is a well-known early "
+            "indicator of cognitive decline."
+        )
+
+        # ----------------------------------------------------
+        # START FLUENCY GAME
+        # ----------------------------------------------------
+        if st.session_state.fluency_round == 0:
+
+            st.markdown(
+                f"### 🎯 {FLUENCY_TOTAL_ROUNDS} rounds | {time_limit} seconds per round"
+            )
+
+            if st.button(
+                "▶️ Start Category Naming Game",
+                type="primary",
+                key="fluency_start",
+                use_container_width=True
+            ):
+
+                st.session_state.fluency_total_score = 0.0
+                st.session_state.fluency_used_categories = []
+                start_fluency_round(1)
+
+                queue_voice(
+                    f"Category Naming game started. Round 1 of {FLUENCY_TOTAL_ROUNDS}. "
+                    f"You have {time_limit} seconds.",
+                    language
+                )
+
+                st.rerun()
+
+        # ----------------------------------------------------
+        # ACTIVE FLUENCY GAME
+        # ----------------------------------------------------
+        else:
+
+            current_round = st.session_state.fluency_round
+            category = st.session_state.fluency_category
+            elapsed = pytime.time() - float(st.session_state.fluency_start_time)
+            remaining = max(0, int(time_limit - elapsed))
+
+            st.progress(
+                current_round / FLUENCY_TOTAL_ROUNDS,
+                text=f"Round {current_round} of {FLUENCY_TOTAL_ROUNDS}"
+            )
+
+            st.success(f"Name as many **{category}** as you can!")
+
+            st.markdown(fluency_timer_banner(remaining), unsafe_allow_html=True)
+
+            response_key = f"fluency_input_{user_id}_{current_round}"
+
+            user_text = st.text_area(
+                "Type the words, separated by comma or space",
+                key=response_key,
+                height=100,
+                disabled=(remaining <= 0)
+            )
+
+            if remaining > 0 and st_autorefresh is not None:
+                st_autorefresh(
+                    interval=1000,
+                    limit=time_limit + 2,
+                    key=f"fluency_timer_{user_id}_{current_round}"
+                )
+            elif remaining <= 0:
+                st.warning("⏰ Time's up! Review your words and submit.")
+
+            exit_col, submit_col = st.columns(2)
+
+            with exit_col:
+                if st.button(
+                    "🚪 Exit Game",
+                    key=f"fluency_exit_{current_round}",
+                    use_container_width=True
+                ):
+                    exit_current_game("Category Naming")
+
+            with submit_col:
+                if st.button(
+                    "✅ Submit Round",
+                    key=f"fluency_submit_{current_round}",
+                    type="primary",
+                    use_container_width=True
+                ):
+
+                    tokens = re.split(r"[,\s]+", (user_text or "").strip().lower())
+                    unique_words = {t for t in tokens if t}
+
+                    valid_bank = set(CATEGORY_FLUENCY_BANK[category])
+                    correct_words = unique_words & valid_bank
+
+                    round_score = min(100, (len(correct_words) / target_count) * 100)
+                    st.session_state.fluency_total_score += round_score
+
+                    st.success(
+                        f"Round {current_round}: {len(correct_words)} valid "
+                        f"{category.lower()} named ({round_score:.0f}/100)."
+                    )
+
+                    if correct_words:
+                        st.caption("Counted: " + ", ".join(sorted(correct_words)))
+
+                    if current_round >= FLUENCY_TOTAL_ROUNDS:
+
+                        final_score = st.session_state.fluency_total_score / FLUENCY_TOTAL_ROUNDS
+
+                        old_difficulty, new_difficulty, result = update_adaptive_difficulty(
+                            user_id, final_score
+                        )
+
+                        rounded_score = round(final_score, 1)
+                        save_completed_game("Category Naming", rounded_score)
+
+                        queue_voice(
+                            game_result_voice(
+                                "Category Naming Challenge", rounded_score,
+                                old_difficulty, new_difficulty, language
+                            ),
+                            language
+                        )
+
+                        st.divider()
+                        st.markdown("## 🏁 Game Complete!")
+
+                        if rounded_score >= 70:
+                            st.success(
+                                f"🎉 Congratulations! You completed the Category Naming "
+                                f"Challenge with a final score of {rounded_score}/100."
+                            )
+                            if new_difficulty > old_difficulty:
+                                st.success(
+                                    f"⬆️ Excellent performance! Your difficulty level "
+                                    f"increased from {old_difficulty} to {new_difficulty}."
+                                )
+                            else:
+                                st.info(f"⭐ Your current difficulty level is {new_difficulty}.")
+                        else:
+                            st.info(
+                                f"Game completed with a final score of {rounded_score}/100. "
+                                f"Keep practicing! Your current difficulty level is {new_difficulty}."
+                            )
+
+                        if st.button(
+                            "🔁 Play Again",
+                            key=f"fluency_play_again_{current_round}",
+                            type="primary",
+                            use_container_width=True
+                        ):
+                            reset_fluency_game()
+                            st.rerun()
+
+                    else:
+                        next_round = current_round + 1
+                        start_fluency_round(next_round)
+
+                        queue_voice(
+                            f"Round {current_round} completed. "
+                            f"Starting round {next_round} of {FLUENCY_TOTAL_ROUNDS}.",
+                            language
+                        )
+
+                        st.rerun()
+
 
 # ============================================================
 # REMINDERS
@@ -6711,7 +6885,7 @@ elif selected_page == "reports":
                     st.rerun()
 
 
-# ===========================================================
+# ============================================================
 # FOOTER
 # ============================================================
 
