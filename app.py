@@ -4401,14 +4401,26 @@ if current_page not in page_keys:
     current_page = "home"
 
 
+# The navigation radio previously had no `key` and was given a fresh
+# `index=` computed from session_state on every rerun. Streamlit bakes
+# that `index` into the widget's internal identity, so every time it
+# changed, the widget was treated as a brand-new widget and your click
+# was silently dropped - that's why it took two clicks to switch tabs.
+# Giving it a stable `key` and only pre-seeding that key when something
+# else (like a "Go to Games" shortcut button) changes st.session_state.page
+# fixes this: normal clicks now register in a single click.
+if "main_nav_radio" not in st.session_state:
+    st.session_state.main_nav_radio = current_page
+elif st.session_state.main_nav_radio != current_page:
+    st.session_state.main_nav_radio = current_page
+
+
 selected_page = st.radio(
     "Navigation",
     page_keys,
     format_func=lambda key: page_names[key],
     horizontal=True,
-    index=page_keys.index(
-        current_page
-    )
+    key="main_nav_radio"
 )
 
 
