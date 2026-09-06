@@ -893,6 +893,13 @@ def get_turso_credentials():
     return turso_url, turso_token
 
 
+# @st.cache_resource makes Streamlit create this connection (and run the
+# CREATE TABLE / ALTER TABLE / migration checks below) only ONCE, the
+# first time the app starts - not on every single click or game switch.
+# Without this, every rerun re-ran all those setup queries, and with a
+# remote Turso database each one is a network round-trip, which is what
+# was causing the noticeable delay when switching games.
+@st.cache_resource
 def get_connection():
 
     turso_url, turso_token = get_turso_credentials()
