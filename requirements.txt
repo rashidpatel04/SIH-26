@@ -1,8 +1,9 @@
 streamlit
-pandas
 gTTS
 SpeechRecognition
 streamlit-mic-recorder
 reportlab
+pandas
 streamlit-autorefresh
-libsql
+gspread
+google-auth
