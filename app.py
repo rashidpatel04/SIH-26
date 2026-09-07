@@ -52,7 +52,7 @@
 #
 # INSTALL:
 #
-# pip install streamlit gTTS SpeechRecognition streamlit-mic-recorder reportlab pandas streamlit-autorefresh
+# pip install streamlit gTTS SpeechRecognition streamlit-mic-recorder reportlab pandas streamlit-autorefresh gspread google-auth
 #
 # RUN:
 #
@@ -69,6 +69,17 @@ import re
 import base64
 import textwrap
 import pandas as pd
+
+# Google Sheets persistence for user/registration data.
+# Install with: pip install gspread google-auth
+try:
+    import gspread
+    from google.oauth2.service_account import Credentials
+    GSPREAD_AVAILABLE = True
+except ImportError:
+    gspread = None
+    Credentials = None
+    GSPREAD_AVAILABLE = False
 
 from datetime import datetime, date, time
 from uuid import uuid4
@@ -995,6 +1006,226 @@ conn = get_connection()
 
 
 # ============================================================
+# GOOGLE SHEETS PERSISTENCE FOR USER / REGISTRATION DATA
+# ============================================================
+# SQLite is still used as the fast local cache for the existing app.
+# Google Sheets becomes the persistent source for the users table, so
+# registrations survive Streamlit restarts/redeployments.
+# Game sessions, reminders and reports continue to use the existing
+# SQLite tables to avoid adding network latency to every game action.
+
+USER_SHEET_HEADERS = [
+    "id", "name", "username", "password_hash", "language", "baseline",
+    "role", "doctor_id", "adaptive_difficulty", "caretaker_id", "phone",
+    "email", "location", "qualification", "qualification_number",
+    "qualification_document", "qualification_status", "account_status",
+    "created_by_id", "created_at"
+]
+
+
+def _google_sheet_configured():
+    if not GSPREAD_AVAILABLE:
+        return False
+    try:
+        return (
+            "gcp_service_account" in st.secrets
+            and "google_sheet_id" in st.secrets
+            and str(st.secrets["google_sheet_id"]).strip() != ""
+        )
+    except Exception:
+        return False
+
+
+@st.cache_resource(show_spinner=False)
+def get_user_worksheet():
+    """Create one cached gspread worksheet connection for the app process."""
+    if not _google_sheet_configured():
+        return None
+
+    try:
+        service_account_info = dict(st.secrets["gcp_service_account"])
+        scopes = [
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive",
+        ]
+        credentials = Credentials.from_service_account_info(
+            service_account_info,
+            scopes=scopes,
+        )
+        client = gspread.authorize(credentials)
+        spreadsheet = client.open_by_key(str(st.secrets["google_sheet_id"]).strip())
+        worksheet_name = str(
+            st.secrets.get("google_users_worksheet", "users")
+        ).strip() or "users"
+
+        try:
+            worksheet = spreadsheet.worksheet(worksheet_name)
+        except gspread.WorksheetNotFound:
+            worksheet = spreadsheet.add_worksheet(
+                title=worksheet_name,
+                rows=1000,
+                cols=len(USER_SHEET_HEADERS),
+            )
+
+        existing_headers = worksheet.row_values(1)
+        if existing_headers[:len(USER_SHEET_HEADERS)] != USER_SHEET_HEADERS:
+            worksheet.update(
+                f"A1:T1",
+                [USER_SHEET_HEADERS],
+            )
+
+        return worksheet
+    except Exception as exc:
+        st.session_state["google_sheet_error"] = str(exc)
+        return None
+
+
+def _sheet_row_values(row):
+    """Convert a sqlite users row into the fixed Google Sheet column order."""
+    return [
+        row[0], row[1], row[2], row[3], row[4], row[5], row[6], row[7],
+        row[8], row[9], row[10], row[11], row[12], row[13], row[14], row[15],
+        row[16], row[17], row[18], row[19]
+    ]
+
+
+def sync_user_to_google_sheet(user_id):
+    """Insert/update one user in Google Sheets using username as stable key."""
+    worksheet = get_user_worksheet()
+    if worksheet is None:
+        return False
+
+    row = conn.execute(
+        """
+        SELECT id, name, username, password_hash, language, baseline,
+               role, doctor_id, adaptive_difficulty, caretaker_id, phone,
+               email, location, qualification, qualification_number,
+               qualification_document, qualification_status, account_status,
+               created_by_id, created_at
+        FROM users
+        WHERE id=?
+        """,
+        (user_id,),
+    ).fetchone()
+
+    if not row:
+        return False
+
+    try:
+        username = str(row[2]).strip()
+        all_rows = worksheet.get_all_values()
+        matching_row = None
+        for sheet_row_number, values in enumerate(all_rows[1:], start=2):
+            if len(values) > 2 and str(values[2]).strip().lower() == username.lower():
+                matching_row = sheet_row_number
+                break
+
+        values = _sheet_row_values(row)
+        if matching_row:
+            worksheet.update(
+                f"A{matching_row}:T{matching_row}",
+                [values],
+                value_input_option="USER_ENTERED",
+            )
+        else:
+            worksheet.append_row(
+                values,
+                value_input_option="USER_ENTERED",
+            )
+        return True
+    except Exception as exc:
+        st.session_state["google_sheet_error"] = str(exc)
+        return False
+
+
+def load_users_from_google_sheet():
+    """Restore users into SQLite when the app starts on a fresh Streamlit instance."""
+    worksheet = get_user_worksheet()
+    if worksheet is None:
+        return
+
+    try:
+        records = worksheet.get_all_records()
+        local_count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+
+        # First deployment / fresh Streamlit instance: restore every user.
+        if local_count == 0 and records:
+            conn.execute("PRAGMA foreign_keys = OFF")
+            for item in records:
+                try:
+                    user_id = int(str(item.get("id", "")).strip())
+                except (TypeError, ValueError):
+                    continue
+                if not item.get("username") or not item.get("password_hash"):
+                    continue
+
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO users(
+                        id, name, username, password_hash, language, baseline,
+                        role, doctor_id, adaptive_difficulty, caretaker_id,
+                        phone, email, location, qualification,
+                        qualification_number, qualification_document,
+                        qualification_status, account_status, created_by_id,
+                        created_at
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        user_id,
+                        str(item.get("name", "")),
+                        str(item.get("username", "")),
+                        str(item.get("password_hash", "")),
+                        str(item.get("language", "English")) or "English",
+                        float(item.get("baseline", 0) or 0),
+                        str(item.get("role", "patient")) or "patient",
+                        int(item.get("doctor_id")) if str(item.get("doctor_id", "")).strip().isdigit() else None,
+                        int(item.get("adaptive_difficulty", 1) or 1),
+                        int(item.get("caretaker_id")) if str(item.get("caretaker_id", "")).strip().isdigit() else None,
+                        str(item.get("phone", "")),
+                        str(item.get("email", "")),
+                        str(item.get("location", "")),
+                        str(item.get("qualification", "")),
+                        str(item.get("qualification_number", "")),
+                        str(item.get("qualification_document", "")),
+                        str(item.get("qualification_status", "Not Required")) or "Not Required",
+                        str(item.get("account_status", "Active")) or "Active",
+                        int(item.get("created_by_id")) if str(item.get("created_by_id", "")).strip().isdigit() else None,
+                        str(item.get("created_at", "")),
+                    ),
+                )
+            conn.commit()
+            conn.execute("PRAGMA foreign_keys = ON")
+
+        # If the sheet is empty but the local DB already has users, back them up.
+        elif local_count > 0 and not records:
+            rows = conn.execute(
+                """
+                SELECT id, name, username, password_hash, language, baseline,
+                       role, doctor_id, adaptive_difficulty, caretaker_id, phone,
+                       email, location, qualification, qualification_number,
+                       qualification_document, qualification_status, account_status,
+                       created_by_id, created_at
+                FROM users ORDER BY id
+                """
+            ).fetchall()
+            if rows:
+                worksheet.update(
+                    "A1:T1",
+                    [USER_SHEET_HEADERS],
+                )
+                worksheet.append_rows(
+                    [_sheet_row_values(row) for row in rows],
+                    value_input_option="USER_ENTERED",
+                )
+    except Exception as exc:
+        st.session_state["google_sheet_error"] = str(exc)
+
+
+# Restore persistent registrations before the login screen starts.
+load_users_from_google_sheet()
+
+
+# ============================================================
 # PROVIDER / PATIENT SECURITY HELPERS
 # ============================================================
 
@@ -1886,6 +2117,14 @@ if st.session_state.logged_in:
 
 if not st.session_state.logged_in:
 
+    if _google_sheet_configured():
+        st.caption("☁️ Registration data is persisted in Google Sheets.")
+    else:
+        st.warning(
+            "Google Sheets is not configured. Registrations are currently stored only in the local SQLite file. "
+            "Add the required Streamlit secrets to make registration persistent on Streamlit Cloud."
+        )
+
     # Login / registration starts directly here.
 
     st.info(
@@ -2212,6 +2451,16 @@ if not st.session_state.logged_in:
 
                     conn.commit()
 
+                    new_user_id = conn.execute(
+                        "SELECT id FROM users WHERE LOWER(username)=LOWER(?)",
+                        (reg_username.strip(),)
+                    ).fetchone()[0]
+                    if _google_sheet_configured() and not sync_user_to_google_sheet(new_user_id):
+                        conn.execute("DELETE FROM users WHERE id=?", (new_user_id,))
+                        conn.commit()
+                        st.error("Could not save the registration to Google Sheets. Please try again.")
+                        st.stop()
+
                     st.success(
                         "Patient account created successfully."
                     )
@@ -2331,6 +2580,16 @@ if not st.session_state.logged_in:
                     )
                     conn.commit()
 
+                    new_user_id = conn.execute(
+                        "SELECT id FROM users WHERE LOWER(username)=LOWER(?)",
+                        (doc_username.strip(),)
+                    ).fetchone()[0]
+                    if _google_sheet_configured() and not sync_user_to_google_sheet(new_user_id):
+                        conn.execute("DELETE FROM users WHERE id=?", (new_user_id,))
+                        conn.commit()
+                        st.error("Could not save the registration to Google Sheets. Please try again.")
+                        st.stop()
+
                     st.success(
                         "Doctor registration submitted. Please wait for administrator verification."
                     )
@@ -2425,6 +2684,16 @@ if not st.session_state.logged_in:
                         )
                     )
                     conn.commit()
+
+                    new_user_id = conn.execute(
+                        "SELECT id FROM users WHERE LOWER(username)=LOWER(?)",
+                        (care_username.strip(),)
+                    ).fetchone()[0]
+                    if _google_sheet_configured() and not sync_user_to_google_sheet(new_user_id):
+                        conn.execute("DELETE FROM users WHERE id=?", (new_user_id,))
+                        conn.commit()
+                        st.error("Could not save the registration to Google Sheets. Please try again.")
+                        st.stop()
 
                     st.success(
                         "Caretaker account created successfully."
@@ -2722,6 +2991,8 @@ if role == "admin":
                                 (d[0],)
                             )
                             conn.commit()
+                            if _google_sheet_configured():
+                                sync_user_to_google_sheet(d[0])
                             announce(
                                 "Doctor qualification verified and account activated.",
                                 "English"
@@ -2744,6 +3015,8 @@ if role == "admin":
                                 (d[0],)
                             )
                             conn.commit()
+                            if _google_sheet_configured():
+                                sync_user_to_google_sheet(d[0])
                             announce(
                                 "Doctor qualification verification was rejected.",
                                 "English"
@@ -2780,6 +3053,8 @@ if role == "admin":
                         (new_status, u[0])
                     )
                     conn.commit()
+                    if _google_sheet_configured():
+                        sync_user_to_google_sheet(u[0])
                     st.rerun()
 
         st.divider()
@@ -3034,6 +3309,13 @@ if role == "doctor":
                         )
                     )
                     conn.commit()
+
+                    new_user_id = conn.execute(
+                        "SELECT id FROM users WHERE LOWER(username)=LOWER(?)",
+                        (patient_username.strip(),)
+                    ).fetchone()[0]
+                    if _google_sheet_configured():
+                        sync_user_to_google_sheet(new_user_id)
 
                     announce(
                         f"Patient {patient_name.strip()} was added and automatically linked to you.",
@@ -3442,6 +3724,13 @@ if role == "caretaker":
                         )
                     )
                     conn.commit()
+
+                    new_user_id = conn.execute(
+                        "SELECT id FROM users WHERE LOWER(username)=LOWER(?)",
+                        (patient_username.strip(),)
+                    ).fetchone()[0]
+                    if _google_sheet_configured():
+                        sync_user_to_google_sheet(new_user_id)
 
                     announce(
                         f"Patient {patient_name.strip()} was added and automatically linked to you.",
@@ -3988,6 +4277,8 @@ with st.sidebar:
         )
 
         conn.commit()
+        if _google_sheet_configured():
+            sync_user_to_google_sheet(user_id)
 
         st.session_state.language = (
             selected_language
